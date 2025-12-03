@@ -1,113 +1,49 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
+import type {
+  GeneratedCode,
+  CredentialCollection,
+  ToolkitConnectionStatus,
+  ToolkitInfo,
+} from "@/types";
+import { useUserId } from "@/hooks/useUserId";
+import { useMessages } from "@/hooks/useMessages";
+import { API_ENDPOINTS, OAUTH_TIMEOUT } from "@/constants";
 import {
-  Play,
-  Code,
-  Eye,
-  Settings,
-  Zap,
-  Link,
-  Check,
-  X,
-  AlertCircle,
-  Loader,
-  Send,
-  Sparkles,
-  RefreshCw,
-} from "lucide-react";
-import ReactMarkdown from "react-markdown";
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-
-interface GeneratedCode {
-  frontend: string;
-  backend: string;
-  discoveredTools: string[];
-  useCase: string;
-  systemPrompt: string;
-  metadata?: {
-    tools: string[];
-    useCase: string;
-    timestamp: string;
-  };
-}
-
-interface ChatMessage {
-  id: string;
-  type: "user" | "assistant" | "system" | "connection-status";
-  content: string;
-  timestamp: Date;
-  data?: any;
-}
-
-interface ToolkitConnectionStatus {
-  connected: boolean;
-  status: "connected" | "connecting" | "not_connected";
-  authScheme?: string;
-  isComposioManaged?: boolean;
-  isOAuth2?: boolean;
-  isApiKey?: boolean;
-  managedSchemes?: string[];
-  toolkitSlug?: string;
-  connectionId?: string;
-  apiKey?: string;
-}
+  extractToolkitName,
+  processFrontendCode,
+  createIframeShims,
+  injectShims,
+  formatToolName,
+  getAuthType,
+  getManagedStatus,
+} from "@/lib/utils";
+import { createConnectionStatus } from "@/lib/toolkit";
+import { ChatHeader } from "@/components/ChatHeader";
+import { ChatMessage } from "@/components/ChatMessage";
+import { CredentialForm } from "@/components/CredentialForm";
+import { ChatInput } from "@/components/ChatInput";
+import { PreviewHeader } from "@/components/PreviewHeader";
 
 export default function Home() {
   const [agentIdea, setAgentIdea] = useState("");
-  const [userId, setUserId] = useState<string>("");
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "1",
-      type: "assistant",
-      content:
-        "Hi! I'm your AI agent builder. Describe the agent you'd like to create and I'll build both the frontend interface and backend logic for you.",
-      timestamp: new Date(),
-    },
-  ]);
+  const userId = useUserId();
+  const { messages, addMessage, messagesEndRef } = useMessages();
   const [generatedCode, setGeneratedCode] = useState<GeneratedCode | null>(
     null
   );
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isExecuting, setIsExecuting] = useState(false);
-  const [iframeKey, setIframeKey] = useState(0);
-  const [toolkitInfos, setToolkitInfos] = useState<Record<string, any>>({});
+  const [toolkitInfos, setToolkitInfos] = useState<
+    Record<string, ToolkitInfo>
+  >({});
   const [connectionStatuses, setConnectionStatuses] = useState<
     Record<string, ToolkitConnectionStatus>
   >({});
-  const [isCheckingConnections, setIsCheckingConnections] = useState(false);
-  const [credentialCollection, setCredentialCollection] = useState<{
-    isCollecting: boolean;
-    toolkitSlug: string;
-    authType: "oauth2" | "api_key";
-    credentials: {
-      clientId?: string;
-      clientSecret?: string;
-      apiKey?: string;
-    };
-  } | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [, setIsCheckingConnections] = useState(false);
+  const [credentialCollection, setCredentialCollection] =
+    useState<CredentialCollection | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-
-  // Initialize user ID from session storage or generate new one
-  useEffect(() => {
-    const storedUserId = sessionStorage.getItem("composio_user_id");
-    if (storedUserId) {
-      setUserId(storedUserId);
-    } else {
-      const newUserId = `user_${Date.now()}_${Math.random()
-        .toString(36)
-        .substr(2, 9)}`;
-      sessionStorage.setItem("composio_user_id", newUserId);
-      setUserId(newUserId);
-    }
-  }, []);
-
-  // Auto scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
 
   // Function to reload only the iframe
   const reloadIframe = () => {
@@ -122,30 +58,21 @@ export default function Home() {
 
           // Regenerate the iframe content if we have generated code
           if (generatedCode) {
-            // Ensure the frontend code is properly formatted and placeholders are replaced
-            let cleanFrontend = generatedCode.frontend
-              .replace(/```html\s*/g, '')
-              .replace(/```\s*$/g, '')
-              .replace(/__LLM_API_KEY__/g, `""`)
-              .replace(/__COMPOSIO_API_KEY__/g, `""`)
-              .replace(/__USER_ID__/g, `"${userId}"`);
-            // Ensure API_BASE_URL works from blob iframe by using document.referrer origin
-            cleanFrontend = cleanFrontend.replace(
-              /const\s+API_BASE_URL\s*=\s*window\.location\.origin\s*;/,
-              'const API_BASE_URL = (document.referrer ? new URL(document.referrer).origin : "");'
+            const cleanFrontend = processFrontendCode(
+              generatedCode.frontend,
+              userId
             );
-
-            // Inject shims: origin/base + in-memory storage
-            const originShim = `<script>(function(){try{var ref=document.referrer;var origin = ref ? new URL(ref).origin : (window.top && window.top.location ? window.top.location.origin : ''); if(origin){ try{var base=document.createElement('base'); base.href = origin + '/'; if(document.head){document.head.prepend(base);} }catch(_){} window.API_BASE_URL = origin; var of = window.fetch; if(of){ window.fetch = function(input, init){ try{ var u = typeof input==='string'? input : (input && input.url)||''; if(u && u.startsWith('/')){ return of(origin + u, init); } }catch(e){} return of(input, init); }; } } }catch(e){}})();</script>`;
-            const storageShim = `<script>(function(){try{window.localStorage.getItem('__test');}catch(e){var m={};var s={getItem:(k)=>Object.prototype.hasOwnProperty.call(m,k)?m[k]:null,setItem:(k,v)=>{m[k]=String(v)},removeItem:(k)=>{delete m[k]},clear:()=>{m={}},key:(i)=>Object.keys(m)[i]||null,get length(){return Object.keys(m).length}};try{Object.defineProperty(window,'localStorage',{value:s,configurable:true});}catch(_){}try{Object.defineProperty(window,'sessionStorage',{value:{...s},configurable:true});}catch(_){} }})();</script>`;
-            const shims = originShim + storageShim;
-            const shimmedFrontend = /<head[^>]*>/i.test(cleanFrontend)
-              ? cleanFrontend.replace(/<head[^>]*>/i, (match: string) => `${match}\n${shims}`)
-              : `${shims}\n${cleanFrontend}`;
+            const shims = createIframeShims();
+            const shimmedFrontend = injectShims(cleanFrontend, shims);
 
             // Render via srcdoc to avoid blob restrictions
-            iframeRef.current.removeAttribute('src');
-            (iframeRef.current as any).srcdoc = shimmedFrontend;
+            if (iframeRef.current) {
+              iframeRef.current.removeAttribute("src");
+              (iframeRef.current as HTMLIFrameElement & { srcdoc: string }).srcdoc =
+                shimmedFrontend;
+            }
+
+            console.log("Updated iframe with AI-generated code");
           }
         } else if (currentSrc.includes("/api/preview")) {
           // For API preview URLs, just reload
@@ -162,28 +89,6 @@ export default function Home() {
         }
       }
     }
-  };
-
-  const addMessage = (message: Omit<ChatMessage, "id" | "timestamp">) => {
-    setMessages((prev) => [
-      ...prev,
-      {
-        ...message,
-        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        timestamp: new Date(),
-      },
-    ]);
-  };
-
-  const extractToolkitName = (toolName: string): string => {
-    if (toolName.startsWith("_")) {
-      const parts = toolName.split("_");
-      if (parts.length >= 3) {
-        return (parts[0] + parts[1]).toLowerCase();
-      }
-    }
-    const firstPart = toolName.split("_")[0];
-    return firstPart.toLowerCase();
   };
 
   const handleGenerateAgent = async () => {
@@ -205,7 +110,7 @@ export default function Home() {
     });
 
     try {
-      const response = await fetch("/api/generate-agent", {
+      const response = await fetch(API_ENDPOINTS.GENERATE_AGENT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ agentIdea }),
@@ -218,20 +123,10 @@ export default function Home() {
         // Add success message with details
         addMessage({
           type: "assistant",
-          content: `Great! I've created your "${
-            code.useCase
-          }" agent. Here's what I built:
+          content: `Great! I've created your "${code.useCase}" agent. Here's what I built:
 
 **Features:**
-${code.discoveredTools
-  .map(
-    (tool: string) =>
-      `• ${tool
-        .replace(/_/g, " ")
-        .toLowerCase()
-        .replace(/\b\w/g, (l: string) => l.toUpperCase())}`
-  )
-  .join("\n")}
+${code.discoveredTools.map((tool: string) => `• ${formatToolName(tool)}`).join("\n")}
 
 **System Capabilities:**
 • Frontend interface with input fields for API keys and prompts
@@ -258,31 +153,15 @@ The agent is now ready for testing on the right side!`,
             URL.revokeObjectURL(iframeRef.current.src);
           }
 
-          // Ensure the frontend code is properly formatted and placeholders are replaced
-          let cleanFrontend = code.frontend
-            .replace(/```html\s*/g, '')
-            .replace(/```\s*$/g, '')
-            .replace(/__LLM_API_KEY__/g, `""`)
-            .replace(/__COMPOSIO_API_KEY__/g, `""`)
-            .replace(/__USER_ID__/g, `"${userId}"`);
-          // Ensure API_BASE_URL works from blob iframe by using document.referrer origin
-          cleanFrontend = cleanFrontend.replace(
-            /const\s+API_BASE_URL\s*=\s*window\.location\.origin\s*;/,
-            'const API_BASE_URL = (document.referrer ? new URL(document.referrer).origin : "");'
-          );
-
-          // Inject shims: origin/base + in-memory storage
-          const originShim = `<script>(function(){try{var ref=document.referrer;var origin = ref ? new URL(ref).origin : (window.top && window.top.location ? window.top.location.origin : ''); if(origin){ try{var base=document.createElement('base'); base.href = origin + '/'; if(document.head){document.head.prepend(base);} }catch(_){} window.API_BASE_URL = origin; var of = window.fetch; if(of){ window.fetch = function(input, init){ try{ var u = typeof input==='string'? input : (input && input.url)||''; if(u && u.startsWith('/')){ return of(origin + u, init); } }catch(e){} return of(input, init); }; } } }catch(e){}})();</script>`;
-          const storageShim = `<script>(function(){try{window.localStorage.getItem('__test');}catch(e){var m={};var s={getItem:(k)=>Object.prototype.hasOwnProperty.call(m,k)?m[k]:null,setItem:(k,v)=>{m[k]=String(v)},removeItem:(k)=>{delete m[k]},clear:()=>{m={}},key:(i)=>Object.keys(m)[i]||null,get length(){return Object.keys(m).length}};try{Object.defineProperty(window,'localStorage',{value:s,configurable:true});}catch(_){}try{Object.defineProperty(window,'sessionStorage',{value:{...s},configurable:true});}catch(_){} }})();</script>`;
-          const shims = originShim + storageShim;
-          const shimmedFrontend = /<head[^>]*>/i.test(cleanFrontend)
-            ? cleanFrontend.replace(/<head[^>]*>/i, (match: string) => `${match}\n${shims}`)
-            : `${shims}\n${cleanFrontend}`;
+          const cleanFrontend = processFrontendCode(code.frontend, userId);
+          const shims = createIframeShims();
+          const shimmedFrontend = injectShims(cleanFrontend, shims);
 
           // Render via srcdoc to avoid blob restrictions
           if (iframeRef.current) {
-            iframeRef.current.removeAttribute('src');
-            (iframeRef.current as any).srcdoc = shimmedFrontend;
+            iframeRef.current.removeAttribute("src");
+            (iframeRef.current as HTMLIFrameElement & { srcdoc: string }).srcdoc =
+              shimmedFrontend;
           }
 
           console.log("Updated iframe with AI-generated code");
@@ -316,7 +195,7 @@ The agent is now ready for testing on the right side!`,
 
       const toolkitPromises = uniqueToolkits.map(async (toolkitSlug) => {
         try {
-          const response = await fetch(`/api/toolkit-info`, {
+          const response = await fetch(API_ENDPOINTS.TOOLKIT_INFO, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -327,7 +206,7 @@ The agent is now ready for testing on the right side!`,
           });
           if (response.ok) {
             const data = await response.json();
-            return { toolkitSlug, toolkit: data.toolkit };
+            return { toolkitSlug, toolkit: data.toolkit as ToolkitInfo };
           } else {
             return { toolkitSlug, toolkit: null };
           }
@@ -338,49 +217,19 @@ The agent is now ready for testing on the right side!`,
 
       const toolkitResults = await Promise.all(toolkitPromises);
 
-      const newToolkitInfos: Record<string, any> = {};
-      const newConnectionStatuses: Record<string, ToolkitConnectionStatus> = {};
+      const newToolkitInfos: Record<string, ToolkitInfo> = {};
+      const newConnectionStatuses: Record<string, ToolkitConnectionStatus> =
+        {};
       const connectionItems: string[] = [];
 
       toolkitResults.forEach(({ toolkitSlug, toolkit }) => {
         if (toolkit) {
           newToolkitInfos[toolkitSlug] = toolkit;
+          const status = createConnectionStatus(toolkit, toolkitSlug);
+          newConnectionStatuses[toolkitSlug] = status;
 
-          const managedSchemes = toolkit.composio_managed_auth_schemes || [];
-          const isComposioManaged = managedSchemes.length > 0;
-          const authScheme = toolkit.auth_config_details?.[0]?.mode;
-          const managedSchemesLower = managedSchemes.map((s: string) =>
-            s.toLowerCase()
-          );
-          const isOAuth2 =
-            managedSchemesLower.includes("oauth2") ||
-            managedSchemesLower.includes("oauth") ||
-            authScheme?.toLowerCase() === "oauth2";
-          const isApiKey =
-            managedSchemesLower.includes("api_key") ||
-            managedSchemesLower.includes("bearer_token") ||
-            managedSchemesLower.includes("apikey") ||
-            authScheme?.toLowerCase() === "api_key";
-
-          newConnectionStatuses[toolkitSlug] = {
-            connected: false,
-            status: "not_connected",
-            authScheme: authScheme,
-            isComposioManaged: isComposioManaged,
-            isOAuth2: isOAuth2,
-            isApiKey: isApiKey,
-            managedSchemes: managedSchemes,
-            toolkitSlug: toolkitSlug,
-          };
-
-          const authType = isOAuth2
-            ? "OAuth2"
-            : isApiKey
-            ? "API Key"
-            : authScheme;
-          const managedStatus = isComposioManaged
-            ? "🟢 Composio Managed"
-            : "🟡 Custom Setup Required";
+          const authType = getAuthType(status);
+          const managedStatus = getManagedStatus(status.isComposioManaged ?? false);
           connectionItems.push(
             `**${toolkit.name}** - ${authType} (${managedStatus})`
           );
@@ -422,7 +271,7 @@ Connect these services to enable your agent's full functionality:`,
       // Clear the credential collection UI
       setCredentialCollection(null);
 
-      const response = await fetch("/api/create-connection", {
+      const response = await fetch(API_ENDPOINTS.CREATE_CONNECTION, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -438,7 +287,7 @@ Connect these services to enable your agent's full functionality:`,
       if (response.ok) {
         if (authType === "oauth2" && data.redirectUrl) {
           // For OAuth2, open redirect URL and wait for connection
-          setConnectionStatuses((prev) => ({
+          setConnectionStatuses((prev: Record<string, ToolkitConnectionStatus>) => ({
             ...prev,
             [toolkitSlug]: { ...prev[toolkitSlug], status: "connecting" },
           }));
@@ -449,7 +298,7 @@ Connect these services to enable your agent's full functionality:`,
           }
         } else {
           // For API key, connection should be immediate
-          setConnectionStatuses((prev) => ({
+          setConnectionStatuses((prev: Record<string, ToolkitConnectionStatus>) => ({
             ...prev,
             [toolkitSlug]: {
               ...prev[toolkitSlug],
@@ -460,20 +309,18 @@ Connect these services to enable your agent's full functionality:`,
 
           addMessage({
             type: "system",
-            content: `✅ ${
-              toolkit?.name || toolkitSlug
-            } connected successfully!`,
+            content: `✅ ${toolkit?.name || toolkitSlug} connected successfully!`,
           });
         }
       } else {
         throw new Error(data.error || "Connection failed");
       }
-    } catch (error: any) {
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown error";
       addMessage({
         type: "system",
-        content: `❌ Failed to connect ${toolkit?.name || toolkitSlug}: ${
-          error.message
-        }`,
+        content: `❌ Failed to connect ${toolkit?.name || toolkitSlug}: ${errorMessage}`,
       });
     }
   };
@@ -491,7 +338,7 @@ Connect these services to enable your agent's full functionality:`,
           content: `Initiating OAuth connection for ${toolkit.name}... Please authorize in the popup window.`,
         });
 
-        const response = await fetch("/api/create-connection", {
+        const response = await fetch(API_ENDPOINTS.CREATE_CONNECTION, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -504,16 +351,16 @@ Connect these services to enable your agent's full functionality:`,
         if (response.ok) {
           const data = await response.json();
           if (data.redirectUrl && data.connectionId) {
-            setConnectionStatuses((prev) => ({
-              ...prev,
-              [toolkitSlug]: { ...prev[toolkitSlug], status: "connecting" },
-            }));
+        setConnectionStatuses((prev: Record<string, ToolkitConnectionStatus>) => ({
+          ...prev,
+          [toolkitSlug]: { ...prev[toolkitSlug], status: "connecting" },
+        }));
 
             window.open(data.redirectUrl, "_blank");
             waitForOAuthConnection(data.connectionId, toolkitSlug);
           } else if (data.connectionId) {
             // Existing connection was found, directly update the status
-            setConnectionStatuses((prev) => ({
+            setConnectionStatuses((prev: Record<string, ToolkitConnectionStatus>) => ({
               ...prev,
               [toolkitSlug]: {
                 ...prev[toolkitSlug],
@@ -524,19 +371,19 @@ Connect these services to enable your agent's full functionality:`,
             }));
             addMessage({
               type: "system",
-              content: `🎉 ${
-                toolkit?.name || toolkitSlug
-              } is already connected! Your agent can now use this service.`,
+              content: `🎉 ${toolkit?.name || toolkitSlug} is already connected! Your agent can now use this service.`,
             });
           }
         } else {
           const errorData = await response.json().catch(() => ({}));
-          console.error('OAuth connection failed:', {
+          console.error("OAuth connection failed:", {
             status: response.status,
             statusText: response.statusText,
-            error: errorData
+            error: errorData,
           });
-          throw new Error(`Failed to initiate OAuth connection: ${errorData.error || response.statusText}`);
+          throw new Error(
+            `Failed to initiate OAuth connection: ${errorData.error || response.statusText}`
+          );
         }
       } else if (status.isComposioManaged && status.isApiKey) {
         // Composio-managed API key - show input form
@@ -569,11 +416,13 @@ Connect these services to enable your agent's full functionality:`,
           content: `${toolkit.name} authentication (${status.authScheme}) is not yet supported in this interface.`,
         });
       }
-    } catch (error: any) {
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown error";
       console.error("Error connecting toolkit:", error);
       addMessage({
         type: "system",
-        content: `❌ Failed to connect ${toolkit.name}: ${error.message}`,
+        content: `❌ Failed to connect ${toolkit.name}: ${errorMessage}`,
       });
     }
   };
@@ -583,12 +432,12 @@ Connect these services to enable your agent's full functionality:`,
     toolkitSlug: string
   ) => {
     try {
-      const response = await fetch("/api/wait-for-connection", {
+      const response = await fetch(API_ENDPOINTS.WAIT_FOR_CONNECTION, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           connectionId,
-          timeout: 300000,
+          timeout: OAUTH_TIMEOUT,
         }),
       });
 
@@ -596,7 +445,7 @@ Connect these services to enable your agent's full functionality:`,
       const toolkit = toolkitInfos[toolkitSlug];
 
       if (data.success && data.status === "ACTIVE") {
-        setConnectionStatuses((prev) => ({
+        setConnectionStatuses((prev: Record<string, ToolkitConnectionStatus>) => ({
           ...prev,
           [toolkitSlug]: {
             ...prev[toolkitSlug],
@@ -608,12 +457,10 @@ Connect these services to enable your agent's full functionality:`,
 
         addMessage({
           type: "system",
-          content: `🎉 ${
-            toolkit?.name || toolkitSlug
-          } connected successfully! Your agent can now use this service.`,
+          content: `🎉 ${toolkit?.name || toolkitSlug} connected successfully! Your agent can now use this service.`,
         });
       } else if (data.status === "EXPIRED" || data.status === "INACTIVE") {
-        setConnectionStatuses((prev) => ({
+        setConnectionStatuses((prev: Record<string, ToolkitConnectionStatus>) => ({
           ...prev,
           [toolkitSlug]: {
             ...prev[toolkitSlug],
@@ -623,9 +470,7 @@ Connect these services to enable your agent's full functionality:`,
 
         addMessage({
           type: "system",
-          content: `❌ OAuth connection for ${
-            toolkit?.name || toolkitSlug
-          } ${data.status.toLowerCase()}. Please try connecting again.`,
+          content: `❌ OAuth connection for ${toolkit?.name || toolkitSlug} ${data.status.toLowerCase()}. Please try connecting again.`,
         });
       } else if (data.status === "TIMEOUT") {
         setConnectionStatuses((prev) => ({
@@ -638,13 +483,11 @@ Connect these services to enable your agent's full functionality:`,
 
         addMessage({
           type: "system",
-          content: `⏰ OAuth connection for ${
-            toolkit?.name || toolkitSlug
-          } timed out. Please try connecting again.`,
+          content: `⏰ OAuth connection for ${toolkit?.name || toolkitSlug} timed out. Please try connecting again.`,
         });
       }
     } catch (error) {
-      setConnectionStatuses((prev) => ({
+      setConnectionStatuses((prev: Record<string, ToolkitConnectionStatus>) => ({
         ...prev,
         [toolkitSlug]: {
           ...prev[toolkitSlug],
@@ -654,17 +497,22 @@ Connect these services to enable your agent's full functionality:`,
 
       addMessage({
         type: "system",
-        content: `❌ Failed to complete OAuth connection for ${
-          toolkitInfos[toolkitSlug]?.name || toolkitSlug
-        }. Please try again.`,
+        content: `❌ Failed to complete OAuth connection for ${toolkitInfos[toolkitSlug]?.name || toolkitSlug}. Please try again.`,
       });
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleGenerateAgent();
+  const handleUpdateCredentials = (
+    credentials: Partial<CredentialCollection["credentials"]>
+  ) => {
+    if (credentialCollection) {
+      setCredentialCollection({
+        ...credentialCollection,
+        credentials: {
+          ...credentialCollection.credentials,
+          ...credentials,
+        },
+      });
     }
   };
 
@@ -672,130 +520,19 @@ Connect these services to enable your agent's full functionality:`,
     <div className="h-screen bg-[#0a0a0a] flex overflow-hidden">
       {/* Left Side - Chat Interface */}
       <div className="w-1/2 flex flex-col border-r border-gray-800/50">
-        {/* Header - Fixed */}
-        <div className="flex-shrink-0 px-6 py-5 border-b border-gray-800/50 bg-gray-900/30 backdrop-blur-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-gradient-to-br from-violet-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-violet-500/20">
-              <Sparkles className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold text-white tracking-tight">
-                AI Agent Builder
-              </h1>
-              <p className="text-sm text-gray-400">
-                Build intelligent agents with custom interfaces
-              </p>
-            </div>
-          </div>
-        </div>
+        <ChatHeader />
 
         {/* Chat Messages - Scrollable Container */}
         <div className="flex-1 overflow-y-auto">
           <div className="px-6 py-6 space-y-6">
             {messages.map((message) => (
-              <div
+              <ChatMessage
                 key={message.id}
-                className={`flex ${
-                  message.type === "user" ? "justify-end" : "justify-start"
-                }`}
-              >
-                <div
-                  className={`max-w-[85%] rounded-2xl px-5 py-4 shadow-sm ${
-                    message.type === "user"
-                      ? "bg-gradient-to-br from-violet-600 to-purple-600 text-white shadow-violet-500/20"
-                      : message.type === "system"
-                      ? "bg-amber-500/10 text-amber-200 border border-amber-500/20 backdrop-blur-sm"
-                      : message.type === "connection-status"
-                      ? "bg-gray-900/60 text-gray-100 border border-gray-700/50 backdrop-blur-sm"
-                      : "bg-gray-900/60 text-gray-100 border border-gray-700/50 backdrop-blur-sm"
-                  }`}
-                >
-                  <div className="text-[15px] leading-relaxed font-medium prose prose-invert prose-sm max-w-none [&>*]:mb-2 [&>*:last-child]:mb-0 [&_strong]:text-current [&_code]:bg-black/20 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-sm [&_code]:font-mono [&_ul]:pl-4 [&_li]:mb-1">
-                    <ReactMarkdown
-                      components={{
-                        p: ({ children }) => (
-                          <p className="mb-2 last:mb-0">{children}</p>
-                        ),
-                        strong: ({ children }) => (
-                          <strong className="font-semibold text-current">
-                            {children}
-                          </strong>
-                        ),
-                        code: ({ children }) => (
-                          <code className="bg-black/20 px-1.5 py-0.5 rounded text-sm font-mono text-current">
-                            {children}
-                          </code>
-                        ),
-                        ul: ({ children }) => (
-                          <ul className="pl-4 space-y-1">{children}</ul>
-                        ),
-                        li: ({ children }) => (
-                          <li className="text-current">{children}</li>
-                        ),
-                      }}
-                    >
-                      {message.content}
-                    </ReactMarkdown>
-                  </div>
-
-                  {/* Connection Status Buttons */}
-                  {message.type === "connection-status" &&
-                    message.data?.toolkits && (
-                      <div className="mt-5 space-y-3">
-                        {Object.entries(
-                          message.data.toolkits as Record<
-                            string,
-                            ToolkitConnectionStatus
-                          >
-                        ).map(([toolkitSlug, status]) => (
-                          <div
-                            key={toolkitSlug}
-                            className="flex items-center justify-between bg-gray-800/40 rounded-xl p-4 border border-gray-700/30"
-                          >
-                            <div className="flex-1">
-                              <div className="font-semibold text-white text-sm">
-                                {toolkitInfos[toolkitSlug]?.name || toolkitSlug}
-                              </div>
-                              <div className="text-xs text-gray-400 mt-1 flex items-center gap-2">
-                                <span
-                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs ${
-                                    status?.isComposioManaged
-                                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                                      : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                                  }`}
-                                >
-                                  {status?.isComposioManaged ? "●" : "◐"}{" "}
-                                  {status?.isComposioManaged
-                                    ? "Managed"
-                                    : "Custom"}
-                                </span>
-                                <span className="text-gray-500">•</span>
-                                <span>{status?.authScheme || "unknown"}</span>
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => connectToolkit(toolkitSlug)}
-                              disabled={status?.status === "connecting"}
-                              className={`text-sm px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
-                                status?.connected
-                                  ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 cursor-default"
-                                  : status?.status === "connecting"
-                                  ? "bg-amber-500/15 text-amber-400 border border-amber-500/20 cursor-not-allowed"
-                                  : "bg-violet-500/15 text-violet-400 border border-violet-500/20 hover:bg-violet-500/25 hover:border-violet-500/30"
-                              }`}
-                            >
-                              {status?.connected
-                                ? "✓ Connected"
-                                : status?.status === "connecting"
-                                ? "⏳ Connecting..."
-                                : "Connect"}
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                </div>
-              </div>
+                message={message}
+                toolkitInfos={toolkitInfos}
+                connectionStatuses={connectionStatuses}
+                onConnectToolkit={connectToolkit}
+              />
             ))}
 
             {isGenerating && (
@@ -816,187 +553,33 @@ Connect these services to enable your agent's full functionality:`,
 
         {/* Credential Collection UI */}
         {credentialCollection && (
-          <div className="flex-shrink-0 p-6 border-t border-gray-800/50 bg-gray-900/40 backdrop-blur-sm">
-            <div className="bg-gray-800/60 rounded-xl p-4 border border-gray-700/30">
-              <h3 className="text-white font-semibold mb-4">
-                Connect{" "}
-                {toolkitInfos[credentialCollection.toolkitSlug]?.name ||
-                  credentialCollection.toolkitSlug}
-              </h3>
-
-              {credentialCollection.authType === "oauth2" ? (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                      Client ID
-                    </label>
-                    <input
-                      type="text"
-                      value={credentialCollection.credentials.clientId || ""}
-                      onChange={(e) =>
-                        setCredentialCollection((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                credentials: {
-                                  ...prev.credentials,
-                                  clientId: e.target.value,
-                                },
-                              }
-                            : null
-                        )
-                      }
-                      placeholder="Enter your client ID"
-                      className="w-full bg-gray-900/50 border border-gray-700/50 rounded-lg px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-violet-500/50"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                      Client Secret
-                    </label>
-                    <input
-                      type="password"
-                      value={
-                        credentialCollection.credentials.clientSecret || ""
-                      }
-                      onChange={(e) =>
-                        setCredentialCollection((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                credentials: {
-                                  ...prev.credentials,
-                                  clientSecret: e.target.value,
-                                },
-                              }
-                            : null
-                        )
-                      }
-                      placeholder="Enter your client secret"
-                      className="w-full bg-gray-900/50 border border-gray-700/50 rounded-lg px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-violet-500/50"
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    API Key
-                  </label>
-                  <input
-                    type="password"
-                    value={credentialCollection.credentials.apiKey || ""}
-                    onChange={(e) =>
-                      setCredentialCollection((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              credentials: {
-                                ...prev.credentials,
-                                apiKey: e.target.value,
-                              },
-                            }
-                          : null
-                      )
-                    }
-                    placeholder="Enter your API key"
-                    className="w-full bg-gray-900/50 border border-gray-700/50 rounded-lg px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-violet-500/50"
-                  />
-                </div>
-              )}
-
-              <div className="flex gap-2 mt-4">
-                <button
-                  onClick={() => handleCredentialSubmit()}
-                  disabled={
-                    credentialCollection.authType === "oauth2"
-                      ? !credentialCollection.credentials.clientId ||
-                        !credentialCollection.credentials.clientSecret
-                      : !credentialCollection.credentials.apiKey
-                  }
-                  className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors"
-                >
-                  Connect
-                </button>
-                <button
-                  onClick={() => setCredentialCollection(null)}
-                  className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
+          <CredentialForm
+            credentialCollection={credentialCollection}
+            toolkitInfos={toolkitInfos}
+            onUpdateCredentials={handleUpdateCredentials}
+            onSubmit={handleCredentialSubmit}
+            onCancel={() => setCredentialCollection(null)}
+          />
         )}
 
         {/* Input - Fixed at Bottom */}
-        <div className="flex-shrink-0 p-6 border-t border-gray-800/50 bg-gray-900/20 backdrop-blur-sm">
-          <div className="flex gap-3">
-            <input
-              type="text"
-              value={agentIdea}
-              onChange={(e) => setAgentIdea(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder="Describe the AI agent you want to build..."
-              disabled={isGenerating}
-              className="flex-1 bg-gray-900/50 border border-gray-700/50 rounded-xl px-5 py-4 text-white placeholder-gray-400 focus:outline-none focus:border-violet-500/50 focus:bg-gray-900/70 transition-all duration-200 text-[15px] backdrop-blur-sm"
-            />
-            <button
-              onClick={handleGenerateAgent}
-              disabled={isGenerating || !agentIdea.trim()}
-              className="bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 disabled:from-gray-700 disabled:to-gray-800 disabled:cursor-not-allowed text-white px-6 py-4 rounded-xl font-semibold transition-all duration-200 flex items-center gap-2 shadow-lg shadow-violet-500/20"
-            >
-              {isGenerating ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                  Building...
-                </>
-              ) : (
-                <>
-                  <Send className="w-4 h-4" />
-                  Build Agent
-                </>
-              )}
-            </button>
-          </div>
-        </div>
+        <ChatInput
+          value={agentIdea}
+          onChange={setAgentIdea}
+          onSend={handleGenerateAgent}
+          disabled={isGenerating}
+          isGenerating={isGenerating}
+        />
       </div>
 
       {/* Right Side - Preview */}
       <div className="w-1/2 flex flex-col bg-gray-950/50">
-        {/* Preview Header - Fixed */}
-        <div className="flex-shrink-0 px-6 py-5 border-b border-gray-800/50 bg-gray-900/30 backdrop-blur-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-white tracking-tight">
-                Live Preview
-              </h2>
-              <p className="text-sm text-gray-400">
-                Your generated agent interface
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={reloadIframe}
-                className="px-3 py-1.5 bg-gray-800/50 hover:bg-gray-700/50 text-gray-300 hover:text-white rounded-lg text-sm transition-colors flex items-center gap-2 border border-gray-700/50"
-                title="Reload iframe"
-              >
-                <RefreshCw className="w-3 h-3" />
-                Reload
-              </button>
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-                <span className="text-xs text-gray-400 font-medium">Live</span>
-              </div>
-            </div>
-          </div>
-        </div>
+        <PreviewHeader onReload={reloadIframe} />
 
         {/* Preview Content - Fixed Height */}
         <div className="flex-1 p-6 bg-gradient-to-br from-gray-900/20 to-gray-800/20 overflow-hidden">
           <div className="h-full flex flex-col">
             {/* HTML Preview - Direct iframe rendering */}
-            {/** Allow same-origin so third-party libs that use localStorage work inside the preview */}
             <iframe
               ref={iframeRef}
               className="flex-1 w-full bg-white shadow-2xl rounded-lg border border-gray-700/50"

@@ -2,6 +2,11 @@
   "name": "lovable-agents",
   "version": "0.1.0",
   "private": true,
+  "author": "davismiler",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/davismiler/lovable-AI-Agent-gpt"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

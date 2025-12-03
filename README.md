@@ -2,6 +2,8 @@
 
 A platform to build custom AI agents with visual frontend builders and powerful backend integration. Generate both frontend interfaces and AI agent backends from simple text descriptions.
 
+**Owner**: [davismiler](https://github.com/davismiler)
+
 ## Features
 
 🎨 **Dynamic Frontend Generation** - Automatically generate beautiful agent interfaces  
@@ -15,8 +17,8 @@ A platform to build custom AI agents with visual frontend builders and powerful 
 
 1. **Clone and Install**
    ```bash
-   git clone ComposioHQ/lovable-for-ai-agents
-   cd lovable-for-ai-agents
+   git clone https://github.com/davismiler/lovable-AI-Agent-gpt.git
+   cd lovable-AI-Agent-gpt
    npm install
    ```
 
