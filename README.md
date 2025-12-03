@@ -17,8 +17,8 @@ A platform to build custom AI agents with visual frontend builders and powerful 
 
 1. **Clone and Install**
    ```bash
-   git clone https://github.com/davismiler/lovable-AI-Agent-gpt.git
-   cd lovable-AI-Agent-gpt
+   git clone https://github.com/davismiler/lovable-ai-agent.git
+   cd lovable-ai-agent
    npm install
    ```
 
