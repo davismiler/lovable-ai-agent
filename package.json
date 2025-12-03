@@ -5,7 +5,7 @@
   "author": "davismiler",
   "repository": {
     "type": "git",
-    "url": "https://github.com/davismiler/lovable-AI-Agent-gpt"
+    "url": "https://github.com/davismiler/lovable-ai-agent"
   },
   "scripts": {
     "dev": "next dev",
